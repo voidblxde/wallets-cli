@@ -7,10 +7,12 @@ import app.storage.FileStorage;
 import app.storage.UserRepository;
 import app.storage.WalletRepository;
 import app.util.Money;
+import app.util.TablePrinter;
 import app.util.Validation;
 
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 public class CommandLoop {
@@ -23,6 +25,8 @@ public class CommandLoop {
     private final WalletRepository walletRepo;
 
     private boolean running = true;
+
+    private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     public CommandLoop(
             AuthService auth,
@@ -57,8 +61,10 @@ public class CommandLoop {
                     handle(line);
                 } catch (AppException e) {
                     report.println("Ошибка: " + e.getMessage());
+                    report.println("Подсказка: help");
                 } catch (Exception e) {
                     report.println("Неожиданная ошибка: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                    report.println("Подсказка: help");
                 }
             }
         } catch (Exception e) {
@@ -70,6 +76,7 @@ public class CommandLoop {
 
     private void handle(String line) {
         ParsedCommand cmd = CommandParser.parse(line);
+
         switch (cmd.name()) {
             case "help" -> printHelp();
 
@@ -133,13 +140,7 @@ public class CommandLoop {
                 LocalDate to = parseDateOrNull(cmd.kv().get("to"));
 
                 List<Operation> ops = wallet.list(type, category, from, to);
-                if (ops.isEmpty()) {
-                    report.println("Операций нет.");
-                    return;
-                }
-                for (Operation op : ops) {
-                    report.println(formatOperation(op));
-                }
+                printOperationsTable(ops);
             }
 
             case "budget" -> {
@@ -154,14 +155,15 @@ public class CommandLoop {
 
                     wallet.setBudget(category, limit);
                     report.println("Ок: бюджет установлен.");
-                    report.println(wallet.formatBudgetLine(category));
+                    printBudgetTable();
                 } else if (sub.equals("show")) {
-                    report.println(wallet.formatBudgetsReport());
+                    printBudgetTable();
                 } else if (sub.equals("remove")) {
                     requireArgs(cmd, 2);
                     String category = Validation.requireNonBlank(cmd.arg(1), "Категория");
                     wallet.removeBudget(category);
                     report.println("Ок: бюджет удалён (если был задан).");
+                    printBudgetTable();
                 } else {
                     throw new AppException("Неизвестная подкоманда budget: " + sub);
                 }
@@ -178,7 +180,7 @@ public class CommandLoop {
                         report.println("Категорий нет.");
                     } else {
                         report.println("Категории:");
-                        for (String c : cats) report.println("  " + c);
+                        for (String c : cats) report.println("  - " + c);
                     }
                 } else {
                     throw new AppException("Неизвестная подкоманда category: " + sub);
@@ -195,23 +197,34 @@ public class CommandLoop {
 
                 switch (sub) {
                     case "total" -> report.println(wallet.formatTotals(from, to));
-                    case "income-by-category" -> report.println(wallet.formatByCategory(OperationType.INCOME, from, to));
-                    case "expense-by-category" -> report.println(wallet.formatByCategory(OperationType.EXPENSE, from, to));
+
+                    case "income-by-category" -> printByCategoryTable(OperationType.INCOME, from, to);
+
+                    case "expense-by-category" -> printByCategoryTable(OperationType.EXPENSE, from, to);
+
                     case "categories" -> {
                         requireArgs(cmd, 2);
                         List<String> cats = Arrays.stream(cmd.arg(1).split(","))
                                 .map(String::trim).filter(s -> !s.isEmpty()).toList();
+
                         String typeStr = cmd.kv().getOrDefault("type", "expense");
                         OperationType t = typeStr.equalsIgnoreCase("income") ? OperationType.INCOME : OperationType.EXPENSE;
 
                         WalletService.CategoriesStatsResult r = wallet.statsForCategories(cats, t, from, to);
+
                         if (!r.missing().isEmpty()) {
                             report.println("Предупреждение: категории не найдены: " + String.join(", ", r.missing()));
                         }
+
                         report.println("Сумма (" + t + ") по выбранным категориям: " + r.total());
-                        report.println("Разбивка:");
-                        r.byCategory().forEach((k, v) -> report.println("  " + k + ": " + v));
+
+                        // Таблица по выбранным категориям
+                        List<List<String>> rows = new ArrayList<>();
+                        rows.add(List.of("Категория", "Сумма"));
+                        r.byCategory().forEach((k, v) -> rows.add(List.of(k, v.stripTrailingZeros().toPlainString())));
+                        printTable(rows);
                     }
+
                     default -> throw new AppException("Неизвестная подкоманда stats: " + sub);
                 }
             }
@@ -244,6 +257,7 @@ public class CommandLoop {
                 report.println("Ок: перевод выполнен.");
                 printAlerts(alerts);
             }
+
             case "export" -> {
                 requireLoggedIn();
                 requireArgs(cmd, 1);
@@ -264,7 +278,6 @@ public class CommandLoop {
                 var path = Path.of(cmd.arg(0));
 
                 var imported = storage.importWallet(path);
-                // принудительно привязываем к текущему пользователю
                 imported.setOwnerLogin(login);
 
                 walletRepo.upsert(imported);
@@ -279,7 +292,7 @@ public class CommandLoop {
                 running = false;
             }
 
-            default -> throw new AppException("Неизвестная команда: " + cmd.name() + ". Напиши: help");
+            default -> throw new AppException("Неизвестная команда: " + cmd.name());
         }
     }
 
@@ -291,48 +304,58 @@ public class CommandLoop {
     private void printHelp() {
         report.setConsole();
         report.println("""
-Команды:
-  help
+=====================================
+        УЧЁТ ЛИЧНЫХ ФИНАНСОВ (CLI)
+=====================================
 
-Авторизация:
-  register <login> <password>
-  login <login> <password>
-  logout
-  whoami
+АВТОРИЗАЦИЯ
+  register <login> <password>         Регистрация
+  login    <login> <password>         Вход
+  logout                               Выход
+  whoami                               Текущий пользователь
 
-Операции:
-  income <category> <amount> [comment...]
+ОПЕРАЦИИ
+  income  <category> <amount> [comment...]
   expense <category> <amount> [comment...]
   list [income|expense] [category=<name>] [from=YYYY-MM-DD] [to=YYYY-MM-DD]
 
-Бюджеты:
-  budget set <category> <limit>
-  budget show
+БЮДЖЕТЫ
+  budget set    <category> <limit>
   budget remove <category>
-  
-Категории:
+  budget show
+
+КАТЕГОРИИ
   category list
 
-Статистика:
+СТАТИСТИКА
   stats total [from=...] [to=...]
   stats income-by-category [from=...] [to=...]
   stats expense-by-category [from=...] [to=...]
   stats categories <cat1,cat2,...> [type=income|expense] [from=...] [to=...]
 
-Вывод:
+ОТЧЁТЫ
   report console
   report file <path>
 
-Импорт/экспорт:
+ИМПОРТ/ЭКСПОРТ
   export <path>
   import <path>
 
-
-Переводы (доп):
+ПЕРЕВОДЫ
   transfer <toLogin> <amount> [comment...]
 
-Выход:
+ВЫХОД
   exit
+
+ПРИМЕРЫ
+  register ivan 1234
+  login ivan 1234
+  income Зарплата 20000
+  expense Еда 500 "покупка продуктов"
+  budget set Еда 4000
+  stats total
+  list expense category=Еда
+  export exports/ivan.json
 """);
     }
 
@@ -341,7 +364,7 @@ public class CommandLoop {
     }
 
     private void requireArgs(ParsedCommand cmd, int n) {
-        if (cmd.args().size() < n) throw new AppException("Недостаточно аргументов. Напиши: help");
+        if (cmd.args().size() < n) throw new AppException("Недостаточно аргументов.");
     }
 
     private void requireLoggedIn() {
@@ -357,15 +380,106 @@ public class CommandLoop {
         }
     }
 
-    private String formatOperation(Operation op) {
-        String base = "%s | %s | %s | %s".formatted(
-                op.getCreatedAt(),
-                op.getType(),
-                op.getCategory(),
-                op.getAmount()
-        );
-        if (op.getCounterpartyLogin() != null) base += " | counterparty=" + op.getCounterpartyLogin();
-        if (op.getComment() != null && !op.getComment().isBlank()) base += " | " + op.getComment();
-        return base;
+    // -------- Pretty output helpers --------
+
+    private void printOperationsTable(List<Operation> ops) {
+        if (ops.isEmpty()) {
+            report.println("Операций нет.");
+            return;
+        }
+
+        List<List<String>> rows = new ArrayList<>();
+        rows.add(List.of("Дата", "Тип", "Категория", "Сумма", "Контрагент", "Комментарий"));
+
+        for (Operation op : ops) {
+            rows.add(List.of(
+                    op.getCreatedAt().format(DT_FMT),
+                    op.getType().name(),
+                    op.getCategory(),
+                    op.getAmount().stripTrailingZeros().toPlainString(),
+                    op.getCounterpartyLogin() == null ? "" : op.getCounterpartyLogin(),
+                    op.getComment() == null ? "" : op.getComment()
+            ));
+        }
+
+        printTable(rows);
+    }
+
+    private void printBudgetTable() {
+        String reportText = wallet.formatBudgetsReport();
+        if (reportText.equals("Бюджеты не заданы.")) {
+            report.println(reportText);
+            return;
+        }
+
+        // Построим таблицу из фактических категорий кошелька (чтобы было ровно)
+        var cats = wallet.listCategories();
+        // но нам нужны только те, где бюджет задан
+        // wallet.listCategories() включает операции; отфильтруем по наличию budget line != "бюджет не задан"
+        List<String> budgetCats = new ArrayList<>();
+        for (String c : cats) {
+            String line = wallet.formatBudgetLine(c);
+            if (!line.endsWith("бюджет не задан")) budgetCats.add(c);
+        }
+
+        if (budgetCats.isEmpty()) {
+            report.println("Бюджеты не заданы.");
+            return;
+        }
+
+        List<List<String>> rows = new ArrayList<>();
+        rows.add(List.of("Категория", "Лимит", "Остаток"));
+
+        for (String cat : budgetCats) {
+            // Берём значения из formatBudgetLine (у тебя там уже расчёт), но для таблицы лучше пересчитать:
+            // оставим простой парс: limit/remaining уже есть в строке, но мы избегаем парсинга.
+            // Поэтому достанем через formatBudgetLine и выведем как есть? Нет — делаем проще:
+            // Используем budget line как "Категория: limit, Оставшийся бюджет: remaining"
+            String line = wallet.formatBudgetLine(cat);
+            // line: "<cat>: <limit>, Оставшийся бюджет: <remaining>"
+            String[] parts = line.split(": ", 2);
+            String rest = parts.length == 2 ? parts[1] : "";
+            String[] restParts = rest.split(", Оставшийся бюджет: ");
+            String limit = restParts.length > 0 ? restParts[0] : "";
+            String remaining = restParts.length > 1 ? restParts[1] : "";
+            rows.add(List.of(cat, limit, remaining));
+        }
+
+        printTable(rows);
+    }
+
+    private void printByCategoryTable(OperationType type, LocalDate from, LocalDate to) {
+        String text = wallet.formatByCategory(type, from, to);
+        if (text.equals("Нет данных.")) {
+            report.println(text);
+            return;
+        }
+
+        // formatByCategory сейчас возвращает строки "  cat: amount"
+        // Лучше сделаем таблицу из текущих данных кошелька: просто повторно запросим через stats categories?
+        // Но не усложняем: распарсим безопасно только эти строки.
+        List<List<String>> rows = new ArrayList<>();
+        rows.add(List.of("Категория", "Сумма"));
+
+        String[] lines = text.split("\\R");
+        for (String ln : lines) {
+            ln = ln.trim();
+            if (ln.isEmpty()) continue;
+            if (ln.startsWith("Доходы") || ln.startsWith("Расходы")) continue;
+            // "cat: amount"
+            int idx = ln.indexOf(':');
+            if (idx <= 0) continue;
+            String cat = ln.substring(0, idx).trim();
+            String amount = ln.substring(idx + 1).trim();
+            rows.add(List.of(cat, amount));
+        }
+
+        printTable(rows);
+    }
+
+    private void printTable(List<List<String>> rows) {
+        for (String line : TablePrinter.format(rows)) {
+            report.println(line);
+        }
     }
 }

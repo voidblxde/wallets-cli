@@ -1,12 +1,12 @@
 package app.services;
 
-import app.cli.AppException;
 import app.domain.*;
 import app.storage.WalletRepository;
 import app.util.Money;
 import app.util.Validation;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -14,6 +14,9 @@ import java.util.stream.Collectors;
 public class WalletService {
     private final AuthService auth;
     private final WalletRepository wallets;
+
+    // Порог предупреждения по бюджету: 80%
+    private static final BigDecimal BUDGET_WARN_RATIO = new BigDecimal("0.80");
 
     public WalletService(AuthService auth, WalletRepository wallets) {
         this.auth = auth;
@@ -82,7 +85,7 @@ public class WalletService {
   Общий доход: %s
   Общие расходы: %s
   Баланс: %s
-""".formatted(income, expense, balance);
+""".formatted(fmt(income), fmt(expense), fmt(balance));
     }
 
     public String formatByCategory(OperationType type, LocalDate from, LocalDate to) {
@@ -91,7 +94,7 @@ public class WalletService {
         if (map.isEmpty()) return "Нет данных.";
 
         StringBuilder sb = new StringBuilder(type == OperationType.INCOME ? "Доходы по категориям:\n" : "Расходы по категориям:\n");
-        map.forEach((k, v) -> sb.append("  ").append(k).append(": ").append(v).append("\n"));
+        map.forEach((k, v) -> sb.append("  ").append(k).append(": ").append(fmt(v)).append("\n"));
         return sb.toString();
     }
 
@@ -114,13 +117,14 @@ public class WalletService {
         BigDecimal spent = sum(w, OperationType.EXPENSE, category, null, null);
         BigDecimal remaining = b.getLimit().subtract(spent);
 
-        return "%s: %s, Оставшийся бюджет: %s".formatted(category, b.getLimit(), remaining);
+        return "%s: %s, Оставшийся бюджет: %s".formatted(category, fmt(b.getLimit()), fmt(remaining));
     }
 
     public CategoriesStatsResult statsForCategories(List<String> categories, OperationType type, LocalDate from, LocalDate to) {
         Wallet w = currentWallet();
         Set<String> existing = w.getOperations().stream()
                 .map(Operation::getCategory)
+                .filter(Objects::nonNull)
                 .map(String::toLowerCase)
                 .collect(Collectors.toSet());
 
@@ -180,24 +184,54 @@ public class WalletService {
         return map;
     }
 
+    /**
+     * Расширенные уведомления:
+     * - 80% бюджета по категории (по пересечению порога)
+     * - превышение бюджета
+     * - расходы превысили доходы
+     * - нулевой/отрицательный баланс
+     */
     private List<String> buildAlerts(Wallet w, Operation lastOp) {
         List<String> alerts = new ArrayList<>();
 
+        // --- Бюджетные уведомления (только для расходов) ---
         if (lastOp.getType() == OperationType.EXPENSE) {
             CategoryBudget b = w.getBudgets().get(lastOp.getCategory());
-            if (b != null) {
+            if (b != null && b.getLimit() != null && b.getLimit().compareTo(BigDecimal.ZERO) > 0) {
                 BigDecimal spent = sum(w, OperationType.EXPENSE, lastOp.getCategory(), null, null);
-                if (spent.compareTo(b.getLimit()) > 0) {
+                BigDecimal limit = b.getLimit();
+
+                // Предупреждение на 80% (по пересечению порога, чтобы не спамить)
+                BigDecimal warnAt = limit.multiply(BUDGET_WARN_RATIO);
+                BigDecimal prevSpent = spent.subtract(lastOp.getAmount());
+                if (prevSpent.compareTo(warnAt) < 0 && spent.compareTo(warnAt) >= 0 && spent.compareTo(limit) < 0) {
+                    alerts.add("Внимание: по категории '" + lastOp.getCategory() + "' израсходовано "
+                            + fmt(spent) + " из " + fmt(limit) + " (" + pct(spent, limit) + ").");
+                }
+
+                // Превышение бюджета
+                if (spent.compareTo(limit) > 0) {
                     alerts.add("Превышен бюджет по категории '" + lastOp.getCategory()
-                            + "': лимит=" + b.getLimit() + ", потрачено=" + spent);
+                            + "': лимит=" + fmt(limit)
+                            + ", потрачено=" + fmt(spent)
+                            + ", перерасход=" + fmt(spent.subtract(limit)) + ".");
                 }
             }
         }
 
+        // --- Общие уведомления по балансу ---
         BigDecimal income = sum(w, OperationType.INCOME, null, null, null);
         BigDecimal expense = sum(w, OperationType.EXPENSE, null, null, null);
+        BigDecimal balance = income.subtract(expense);
+
         if (expense.compareTo(income) > 0) {
-            alerts.add("Расходы превысили доходы: доход=" + income + ", расход=" + expense);
+            alerts.add("Расходы превысили доходы: доход=" + fmt(income) + ", расход=" + fmt(expense) + ".");
+        }
+
+        if (balance.compareTo(BigDecimal.ZERO) == 0) {
+            alerts.add("Баланс равен 0.");
+        } else if (balance.compareTo(BigDecimal.ZERO) < 0) {
+            alerts.add("Внимание: баланс отрицательный: " + fmt(balance) + ".");
         }
 
         return alerts;
@@ -207,5 +241,17 @@ public class WalletService {
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    private String fmt(BigDecimal x) {
+        if (x == null) return "0";
+        // без научной нотации
+        return x.stripTrailingZeros().toPlainString();
+    }
+
+    private String pct(BigDecimal spent, BigDecimal limit) {
+        if (spent == null || limit == null || limit.compareTo(BigDecimal.ZERO) <= 0) return "0%";
+        BigDecimal p = spent.multiply(new BigDecimal("100")).divide(limit, 0, RoundingMode.HALF_UP);
+        return p.toPlainString() + "%";
     }
 }

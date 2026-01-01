@@ -412,10 +412,7 @@ public class CommandLoop {
             return;
         }
 
-        // Построим таблицу из фактических категорий кошелька (чтобы было ровно)
         var cats = wallet.listCategories();
-        // но нам нужны только те, где бюджет задан
-        // wallet.listCategories() включает операции; отфильтруем по наличию budget line != "бюджет не задан"
         List<String> budgetCats = new ArrayList<>();
         for (String c : cats) {
             String line = wallet.formatBudgetLine(c);
@@ -431,12 +428,8 @@ public class CommandLoop {
         rows.add(List.of("Категория", "Лимит", "Остаток"));
 
         for (String cat : budgetCats) {
-            // Берём значения из formatBudgetLine (у тебя там уже расчёт), но для таблицы лучше пересчитать:
-            // оставим простой парс: limit/remaining уже есть в строке, но мы избегаем парсинга.
-            // Поэтому достанем через formatBudgetLine и выведем как есть? Нет — делаем проще:
-            // Используем budget line как "Категория: limit, Оставшийся бюджет: remaining"
+
             String line = wallet.formatBudgetLine(cat);
-            // line: "<cat>: <limit>, Оставшийся бюджет: <remaining>"
             String[] parts = line.split(": ", 2);
             String rest = parts.length == 2 ? parts[1] : "";
             String[] restParts = rest.split(", Оставшийся бюджет: ");
@@ -455,9 +448,7 @@ public class CommandLoop {
             return;
         }
 
-        // formatByCategory сейчас возвращает строки "  cat: amount"
-        // Лучше сделаем таблицу из текущих данных кошелька: просто повторно запросим через stats categories?
-        // Но не усложняем: распарсим безопасно только эти строки.
+
         List<List<String>> rows = new ArrayList<>();
         rows.add(List.of("Категория", "Сумма"));
 

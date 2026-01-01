@@ -245,7 +245,6 @@ public class WalletService {
 
     private String fmt(BigDecimal x) {
         if (x == null) return "0";
-        // без научной нотации
         return x.stripTrailingZeros().toPlainString();
     }
 

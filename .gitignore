@@ -36,3 +36,10 @@ build/
 
 ### Mac OS ###
 .DS_Store
+/data/wallets/daun.json
+/data/wallets/ivan.json
+/exports/ivan.json
+/out.txt
+/data/wallets/petr.json
+/src/main/java/app/util/TablePrinter.java
+/data/users.json
